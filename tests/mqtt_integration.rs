@@ -3,26 +3,37 @@
 #![cfg(target_os = "linux")]
 
 use std::{
-    fs,
+    fs, io,
+    net::SocketAddr,
     path::{Path, PathBuf},
+    process::{Child, Command, Output, Stdio},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH},
 };
 
 use rpi_health_mqtt::{
     config::{Config, MqttCredentials},
     discovery::{build_discovery_message, DiscoverySettings},
+    model::ObservationTime,
     mqtt::{MqttSettings, MqttStatus, MqttSupervisor, StateMessage},
 };
 use rumqttc::{
     AsyncClient, ConnectReturnCode, Event, EventLoop, Incoming, MqttOptions, QoS, SubscribeFilter,
 };
-use tokio::sync::watch;
+use rustix::process::{kill_process, Pid, Signal};
+use tokio::{
+    io::copy_bidirectional,
+    net::{TcpListener, TcpStream},
+    sync::watch,
+    task::JoinHandle,
+};
 
 const USERNAME: &str = "monitor-example";
 const PASSWORD: &str = "test-only-password";
 const BASE_TOPIC: &str = "example/monitor/example-pi";
 const DISCOVERY_TOPIC: &str = "homeassistant/device/example-pi/config";
+const DAEMON_DISCOVERY_PREFIX: &str = "integration/discovery";
+const SERVICE_BINARY: &str = "/usr/local/bin/rpi-health-mqtt";
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires the Docker validation broker"]
@@ -140,6 +151,542 @@ async fn publication_retention_shutdown_and_authentication_contract() {
     assert_rejected_authentication_is_secret_safe(&host, port).await;
     state_responder.abort();
     fs::remove_file(password_path).expect("password fixture should be removed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires the Docker validation broker and service binary"]
+async fn daemon_binary_recovers_and_obeys_process_lifecycle_contract() {
+    let host = std::env::var("MQTT_TEST_HOST").expect("broker host must be configured");
+    let port = std::env::var("MQTT_TEST_PORT")
+        .expect("broker port must be configured")
+        .parse::<u16>()
+        .expect("broker port must be numeric");
+    let proxy = FaultProxy::start(&host, port).await;
+
+    let graceful_id = "daemon-graceful";
+    let graceful_base = daemon_base_topic(graceful_id);
+    let graceful_discovery = daemon_discovery_topic(graceful_id);
+    let (_observer, mut observer_events) = subscribed_to_topics(
+        &host,
+        port,
+        "daemon-graceful-observer",
+        &graceful_base,
+        &graceful_discovery,
+    )
+    .await;
+    let graceful_fixture = DaemonFixture::new(graceful_id, &graceful_base, proxy.address());
+    let mut graceful_process = spawn_daemon(&graceful_fixture.config_path);
+
+    let initial =
+        receive_bootstrap(&mut observer_events, &graceful_base, &graceful_discovery).await;
+    assert_bootstrap_contract(&initial);
+    let initial_observed_at = observed_at(&initial.state);
+    assert_process_running(&mut graceful_process);
+    assert_retained_lifecycle(
+        &host,
+        port,
+        "daemon-initial-retained-observer",
+        &graceful_base,
+        &graceful_discovery,
+        b"online",
+    )
+    .await;
+
+    proxy.interrupt();
+    let interrupted_offline = next_topic_publish(
+        &mut observer_events,
+        &format!("{graceful_base}/availability"),
+        Duration::from_secs(8),
+    )
+    .await
+    .expect("the broker should publish the last will after path interruption");
+    assert_eq!(interrupted_offline.payload.as_ref(), b"offline");
+    assert_eq!(interrupted_offline.qos, QoS::AtLeastOnce);
+    assert_process_running(&mut graceful_process);
+
+    let restored_at = ObservationTime::now_utc();
+    proxy.restore();
+    let recovered =
+        receive_bootstrap(&mut observer_events, &graceful_base, &graceful_discovery).await;
+    assert_bootstrap_contract(&recovered);
+    let recovered_observed_at = observed_at(&recovered.state);
+    assert!(recovered_observed_at > restored_at);
+    assert!(recovered_observed_at > initial_observed_at);
+    assert_process_running(&mut graceful_process);
+    assert!(
+        next_topic_publish(
+            &mut observer_events,
+            &format!("{graceful_base}/state"),
+            Duration::from_secs(1),
+        )
+        .await
+        .is_none(),
+        "recovery must not replay historical state"
+    );
+
+    let graceful_stop_started = StdInstant::now();
+    kill_process(Pid::from_child(&graceful_process), Signal::TERM)
+        .expect("SIGTERM should be delivered to the service");
+    let graceful_wait = tokio::task::spawn_blocking(move || graceful_process.wait_with_output());
+    let graceful_offline = next_topic_publish(
+        &mut observer_events,
+        &format!("{graceful_base}/availability"),
+        Duration::from_secs(8),
+    )
+    .await
+    .expect("graceful shutdown should publish offline");
+    assert_eq!(graceful_offline.payload.as_ref(), b"offline");
+    assert_eq!(graceful_offline.qos, QoS::AtLeastOnce);
+    let graceful_output = wait_for_output(graceful_wait, Duration::from_secs(9)).await;
+    assert!(graceful_output.status.success());
+    assert!(graceful_stop_started.elapsed() < Duration::from_secs(10));
+    assert_daemon_output_is_safe(&graceful_output);
+    assert_retained_lifecycle(
+        &host,
+        port,
+        "daemon-graceful-final-observer",
+        &graceful_base,
+        &graceful_discovery,
+        b"offline",
+    )
+    .await;
+    drop(graceful_fixture);
+
+    let abrupt_id = "daemon-abrupt";
+    let abrupt_base = daemon_base_topic(abrupt_id);
+    let abrupt_discovery = daemon_discovery_topic(abrupt_id);
+    let (_abrupt_observer, mut abrupt_events) = subscribed_to_topics(
+        &host,
+        port,
+        "daemon-abrupt-observer",
+        &abrupt_base,
+        &abrupt_discovery,
+    )
+    .await;
+    let abrupt_fixture = DaemonFixture::new(abrupt_id, &abrupt_base, proxy.address());
+    let mut abrupt_process = spawn_daemon(&abrupt_fixture.config_path);
+    let abrupt_bootstrap =
+        receive_bootstrap(&mut abrupt_events, &abrupt_base, &abrupt_discovery).await;
+    assert_bootstrap_contract(&abrupt_bootstrap);
+    abrupt_process
+        .kill()
+        .expect("the service should accept an abrupt kill");
+    let abrupt_wait = tokio::task::spawn_blocking(move || abrupt_process.wait_with_output());
+    let last_will = next_topic_publish(
+        &mut abrupt_events,
+        &format!("{abrupt_base}/availability"),
+        Duration::from_secs(8),
+    )
+    .await
+    .expect("an abrupt stop should trigger the last will");
+    assert_eq!(last_will.payload.as_ref(), b"offline");
+    assert_eq!(last_will.qos, QoS::AtLeastOnce);
+    let abrupt_output = wait_for_output(abrupt_wait, Duration::from_secs(5)).await;
+    assert!(!abrupt_output.status.success());
+    assert_daemon_output_is_safe(&abrupt_output);
+    assert_retained_lifecycle(
+        &host,
+        port,
+        "daemon-abrupt-final-observer",
+        &abrupt_base,
+        &abrupt_discovery,
+        b"offline",
+    )
+    .await;
+
+    drop(abrupt_fixture);
+    proxy.stop().await;
+}
+
+struct BootstrapPublications {
+    discovery: rumqttc::Publish,
+    online: rumqttc::Publish,
+    state: rumqttc::Publish,
+}
+
+async fn receive_bootstrap(
+    events: &mut EventLoop,
+    base_topic: &str,
+    discovery_topic: &str,
+) -> BootstrapPublications {
+    let availability_topic = format!("{base_topic}/availability");
+    let state_topic = format!("{base_topic}/state");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut discovery = None;
+        let mut online = None;
+        let mut state = None;
+        while discovery.is_none() || online.is_none() || state.is_none() {
+            let publish = loop {
+                if let Event::Incoming(Incoming::Publish(publish)) = events
+                    .poll()
+                    .await
+                    .expect("observer event loop should remain connected")
+                {
+                    break publish;
+                }
+            };
+            if publish.topic == discovery_topic {
+                discovery = Some(publish);
+            } else if publish.topic == availability_topic && publish.payload.as_ref() == b"online" {
+                online = Some(publish);
+            } else if publish.topic == state_topic {
+                state = Some(publish);
+            }
+        }
+        BootstrapPublications {
+            discovery: discovery.expect("discovery should be present"),
+            online: online.expect("online should be present"),
+            state: state.expect("state should be present"),
+        }
+    })
+    .await
+    .expect("daemon bootstrap should be bounded")
+}
+
+fn assert_bootstrap_contract(messages: &BootstrapPublications) {
+    assert_eq!(messages.discovery.qos, QoS::AtLeastOnce);
+    assert!(serde_json::from_slice::<serde_json::Value>(&messages.discovery.payload).is_ok());
+    assert_eq!(messages.online.qos, QoS::AtLeastOnce);
+    assert_eq!(messages.online.payload.as_ref(), b"online");
+    assert_eq!(messages.state.qos, QoS::AtMostOnce);
+    assert!(!messages.state.retain);
+    assert!(serde_json::from_slice::<serde_json::Value>(&messages.state.payload).is_ok());
+}
+
+fn observed_at(state: &rumqttc::Publish) -> ObservationTime {
+    let document: serde_json::Value =
+        serde_json::from_slice(&state.payload).expect("state should be valid JSON");
+    ObservationTime::parse(
+        document["observed_at"]
+            .as_str()
+            .expect("state should contain an observation timestamp"),
+    )
+    .expect("observation timestamp should be RFC 3339")
+}
+
+async fn next_topic_publish(
+    events: &mut EventLoop,
+    topic: &str,
+    timeout: Duration,
+) -> Option<rumqttc::Publish> {
+    tokio::time::timeout(timeout, async {
+        loop {
+            if let Event::Incoming(Incoming::Publish(publish)) = events
+                .poll()
+                .await
+                .expect("observer event loop should remain connected")
+            {
+                if publish.topic == topic {
+                    return publish;
+                }
+            }
+        }
+    })
+    .await
+    .ok()
+}
+
+async fn subscribed_to_topics(
+    host: &str,
+    port: u16,
+    client_id: &str,
+    base_topic: &str,
+    discovery_topic: &str,
+) -> (AsyncClient, EventLoop) {
+    let (client, mut events) = observer(host, port, client_id, PASSWORD);
+    connect(&mut events).await;
+    client
+        .subscribe_many([
+            SubscribeFilter::new(format!("{base_topic}/#"), QoS::AtLeastOnce),
+            SubscribeFilter::new(discovery_topic.to_owned(), QoS::AtLeastOnce),
+        ])
+        .await
+        .expect("observer subscriptions should queue");
+    wait_for_subscription(&mut events).await;
+    (client, events)
+}
+
+async fn wait_for_subscription(events: &mut EventLoop) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                events
+                    .poll()
+                    .await
+                    .expect("observer should remain connected"),
+                Event::Incoming(Incoming::SubAck(_))
+            ) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("observer subscription should be acknowledged");
+}
+
+async fn assert_retained_lifecycle(
+    host: &str,
+    port: u16,
+    client_id: &str,
+    base_topic: &str,
+    discovery_topic: &str,
+    availability: &[u8],
+) {
+    let (_client, mut events) =
+        subscribed_to_topics(host, port, client_id, base_topic, discovery_topic).await;
+    let first = next_publish(&mut events).await;
+    let second = next_publish(&mut events).await;
+    let retained = [first, second];
+    assert!(find_topic(&retained, discovery_topic).retain);
+    let retained_availability = find_topic(&retained, &format!("{base_topic}/availability"));
+    assert!(retained_availability.retain);
+    assert_eq!(retained_availability.payload.as_ref(), availability);
+    assert!(
+        next_topic_publish(
+            &mut events,
+            &format!("{base_topic}/state"),
+            Duration::from_millis(300),
+        )
+        .await
+        .is_none(),
+        "state must not be retained"
+    );
+}
+
+struct FaultProxy {
+    address: SocketAddr,
+    enabled: watch::Sender<bool>,
+    accept_task: JoinHandle<()>,
+}
+
+impl FaultProxy {
+    async fn start(upstream_host: &str, upstream_port: u16) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("fault proxy should bind");
+        let address = listener
+            .local_addr()
+            .expect("fault proxy should have a local address");
+        let upstream_host: Arc<str> = Arc::from(upstream_host);
+        let (enabled, enabled_receiver) = watch::channel(true);
+        let accept_task = tokio::spawn(async move {
+            loop {
+                let (connection, _) = match listener.accept().await {
+                    Ok(accepted) => accepted,
+                    Err(_) => return,
+                };
+                let receiver = enabled_receiver.clone();
+                if !*receiver.borrow() {
+                    drop(connection);
+                    continue;
+                }
+                let host = Arc::clone(&upstream_host);
+                tokio::spawn(proxy_connection(connection, host, upstream_port, receiver));
+            }
+        });
+        Self {
+            address,
+            enabled,
+            accept_task,
+        }
+    }
+
+    fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    fn interrupt(&self) {
+        self.enabled.send_replace(false);
+    }
+
+    fn restore(&self) {
+        self.enabled.send_replace(true);
+    }
+
+    async fn stop(self) {
+        self.enabled.send_replace(false);
+        self.accept_task.abort();
+        let _ = self.accept_task.await;
+    }
+}
+
+async fn proxy_connection(
+    mut downstream: TcpStream,
+    upstream_host: Arc<str>,
+    upstream_port: u16,
+    mut enabled: watch::Receiver<bool>,
+) {
+    let connection = TcpStream::connect((upstream_host.as_ref(), upstream_port));
+    let mut upstream = tokio::select! {
+        result = connection => match result {
+            Ok(connection) => connection,
+            Err(_) => return,
+        },
+        () = wait_for_interruption(&mut enabled) => return,
+    };
+    if !*enabled.borrow() {
+        return;
+    }
+    tokio::select! {
+        _ = copy_bidirectional(&mut downstream, &mut upstream) => {}
+        () = wait_for_interruption(&mut enabled) => {}
+    }
+}
+
+async fn wait_for_interruption(enabled: &mut watch::Receiver<bool>) {
+    loop {
+        if !*enabled.borrow_and_update() {
+            return;
+        }
+        if enabled.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+struct DaemonFixture {
+    directory: PathBuf,
+    config_path: PathBuf,
+}
+
+impl DaemonFixture {
+    fn new(device_id: &str, base_topic: &str, proxy: SocketAddr) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "rpi-health-mqtt-daemon-integration-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).expect("daemon fixture directory should be created");
+        let password_path = directory.join("mqtt-password");
+        fs::write(&password_path, format!("{PASSWORD}\n"))
+            .expect("daemon password fixture should be written");
+        fs::set_permissions(&password_path, fs::Permissions::from_mode(0o600))
+            .expect("daemon password permissions should be restricted");
+
+        let vcgencmd_path = directory.join("vcgencmd");
+        fs::write(
+            &vcgencmd_path,
+            br#"#!/bin/sh
+case "$1" in
+  get_throttled)
+    printf '%s\n' 'throttled=0x0'
+    ;;
+  measure_temp)
+    printf '%s\n' "temp=42.0'C"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+"#,
+        )
+        .expect("fake firmware command should be written");
+        fs::set_permissions(&vcgencmd_path, fs::Permissions::from_mode(0o700))
+            .expect("fake firmware command should be executable");
+
+        let config_path = directory.join("config.toml");
+        let config = format!(
+            r#"
+[device]
+id = "{device_id}"
+name = "Integration Raspberry Pi"
+
+[mqtt]
+host = "{}"
+port = {}
+client_id = "rpi-health-mqtt-{device_id}"
+username = "{USERNAME}"
+password_file = "{}"
+base_topic = "{base_topic}"
+discovery_prefix = "{DAEMON_DISCOVERY_PREFIX}"
+keep_alive_seconds = 5
+
+[collector]
+interval_seconds = 30
+root_filesystem = "/"
+vcgencmd_path = "{}"
+command_timeout_seconds = 2
+"#,
+            proxy.ip(),
+            proxy.port(),
+            password_path.display(),
+            vcgencmd_path.display(),
+        );
+        fs::write(&config_path, config).expect("daemon configuration should be written");
+        Self {
+            directory,
+            config_path,
+        }
+    }
+}
+
+impl Drop for DaemonFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn daemon_base_topic(device_id: &str) -> String {
+    format!("integration/daemon/{device_id}")
+}
+
+fn daemon_discovery_topic(device_id: &str) -> String {
+    format!("{DAEMON_DISCOVERY_PREFIX}/device/{device_id}/config")
+}
+
+fn spawn_daemon(config_path: &Path) -> Child {
+    let binary =
+        std::env::var("RPI_HEALTH_MQTT_TEST_BINARY").unwrap_or_else(|_| SERVICE_BINARY.to_owned());
+    Command::new(binary)
+        .arg("--config")
+        .arg(config_path)
+        .env("RUST_LOG", "info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("service binary should start")
+}
+
+fn assert_process_running(process: &mut Child) {
+    assert!(
+        process
+            .try_wait()
+            .expect("service status should be readable")
+            .is_none(),
+        "service should remain running"
+    );
+}
+
+async fn wait_for_output(task: JoinHandle<io::Result<Output>>, timeout: Duration) -> Output {
+    tokio::time::timeout(timeout, task)
+        .await
+        .expect("service process should stop within its deadline")
+        .expect("process waiter should not panic")
+        .expect("service output should be collected")
+}
+
+fn assert_daemon_output_is_safe(output: &Output) {
+    assert!(output.stdout.is_empty(), "daemon stdout must remain empty");
+    assert!(
+        !output
+            .stdout
+            .windows(PASSWORD.len())
+            .any(|value| value == PASSWORD.as_bytes()),
+        "daemon stdout must not expose the credential canary"
+    );
+    assert!(
+        !output
+            .stderr
+            .windows(PASSWORD.len())
+            .any(|value| value == PASSWORD.as_bytes()),
+        "daemon stderr must not expose the credential canary"
+    );
 }
 
 async fn subscribed_observer(host: &str, port: u16, client_id: &str) -> (AsyncClient, EventLoop) {

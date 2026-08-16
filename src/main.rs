@@ -7,9 +7,11 @@ use rpi_health_mqtt::{
     cli::{Cli, Command, CONFIG_ERROR, DIAGNOSTIC_ERROR, RUNTIME_ERROR, SUCCESS},
     collector::Collector,
     config::{Config, MqttCredentials},
+    daemon,
 };
 
 fn main() -> ExitCode {
+    daemon::initialize_logging();
     match Cli::try_parse() {
         Ok(cli) => ExitCode::from(run(cli)),
         Err(error) => {
@@ -46,10 +48,13 @@ fn run(cli: Cli) -> u8 {
             }
         },
         None => match MqttCredentials::load(config.mqtt()) {
-            Ok(_) => {
-                eprintln!("The monitoring runtime is not available in this incremental build.");
-                RUNTIME_ERROR
-            }
+            Ok(credentials) => match daemon::run(config, credentials) {
+                Ok(()) => SUCCESS,
+                Err(error) => {
+                    eprintln!("Runtime error: {error}");
+                    RUNTIME_ERROR
+                }
+            },
             Err(error) => {
                 eprintln!("Configuration error: {error}");
                 CONFIG_ERROR

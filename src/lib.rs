@@ -8,6 +8,7 @@
 pub mod cli;
 pub mod collector;
 pub mod config;
+pub mod daemon;
 pub mod discovery;
 pub mod metrics;
 pub mod model;

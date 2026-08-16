@@ -25,6 +25,7 @@ services:
     environment:
       MQTT_TEST_HOST: broker
       MQTT_TEST_PORT: "1883"
+    user: "65532:65532"
     depends_on:
       broker:
         condition: service_healthy

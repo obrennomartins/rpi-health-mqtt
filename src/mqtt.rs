@@ -12,11 +12,12 @@ use std::{
 };
 
 use rumqttc::{
-    AsyncClient, ConnectReturnCode, Event, EventLoop, Incoming, LastWill, MqttOptions,
-    NetworkOptions, Outgoing, QoS,
+    AsyncClient, ConnectReturnCode, ConnectionError, Event, EventLoop, Incoming, LastWill,
+    MqttOptions, NetworkOptions, Outgoing, QoS,
 };
 use thiserror::Error;
 use tokio::sync::watch;
+use tracing::{debug, info, warn};
 
 use crate::{config::MqttConfig, config::MqttCredentials, discovery::DiscoveryMessage};
 
@@ -24,7 +25,7 @@ const REQUEST_CHANNEL_CAPACITY: usize = 16;
 const MAX_PACKET_BYTES: usize = 64 * 1024;
 const MAX_INFLIGHT: u16 = 4;
 const CONNECT_TIMEOUT_SECONDS: u64 = 5;
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const RETRY_SECONDS: [u64; 7] = [1, 2, 4, 8, 16, 30, 60];
 
 /// Immutable, non-secret MQTT settings used by the supervisor.
@@ -227,7 +228,6 @@ impl MqttSupervisor {
         let mut protocol = BootstrapMachine::default();
         let mut backoff = RetryBackoff::new();
         let mut jitter = Jitter::new();
-        let mut next_request_id = 0_u64;
 
         loop {
             if *self.shutdown.borrow() {
@@ -249,10 +249,11 @@ impl MqttSupervisor {
                             if let Event::Incoming(Incoming::ConnAck(ref acknowledgement)) = event {
                                 if acknowledgement.code == ConnectReturnCode::Success {
                                     backoff.reset();
-                                    next_request_id = next_request_id.saturating_add(1);
                                     self.states.borrow_and_update();
-                                    self.collection_requests.send_replace(next_request_id);
+                                    let next_request_id =
+                                        request_collection(&self.collection_requests);
                                     self.status.send_replace(MqttStatus::Bootstrapping);
+                                    info!("MQTT connection established");
                                     let action = protocol.connected(next_request_id);
                                     self.perform(&client, action, None)?;
                                     continue;
@@ -260,10 +261,24 @@ impl MqttSupervisor {
                             }
                             self.handle_event(&client, &mut protocol, event)?;
                         }
-                        Err(_) => {
+                        Err(error) => {
                             protocol.connection_lost();
                             self.status.send_replace(MqttStatus::Disconnected);
                             let delay = backoff.next_delay(jitter.next_unit());
+                            match retry_reason(&error) {
+                                RetryReason::AuthenticationRejected => warn!(
+                                    retry_after_milliseconds = delay.as_millis(),
+                                    "MQTT authentication rejected; retrying"
+                                ),
+                                RetryReason::BrokerRejected => warn!(
+                                    retry_after_milliseconds = delay.as_millis(),
+                                    "MQTT connection rejected by broker; retrying"
+                                ),
+                                RetryReason::Transport => warn!(
+                                    retry_after_milliseconds = delay.as_millis(),
+                                    "MQTT connection unavailable; retrying"
+                                ),
+                            }
                             tokio::select! {
                                 () = tokio::time::sleep(delay) => {}
                                 changed = self.shutdown.changed() => {
@@ -285,6 +300,7 @@ impl MqttSupervisor {
 
             if protocol.just_became_online() {
                 self.status.send_replace(MqttStatus::Online);
+                info!("MQTT bootstrap completed");
                 self.publish_current_state(&client, &mut protocol)?;
             } else if protocol.is_online() {
                 self.status.send_replace(MqttStatus::Online);
@@ -369,6 +385,7 @@ impl MqttSupervisor {
         protocol: &mut BootstrapMachine,
     ) -> Result<(), MqttError> {
         self.status.send_replace(MqttStatus::ShuttingDown);
+        debug!("graceful MQTT shutdown started");
         let Some(action) = protocol.shutdown() else {
             self.status.send_replace(MqttStatus::Stopped);
             return Ok(());
@@ -389,9 +406,51 @@ impl MqttSupervisor {
                 }
             }
         };
-        let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, sequence).await;
+        shutdown_sequence_result(
+            tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, sequence)
+                .await
+                .ok(),
+        )?;
         self.status.send_replace(MqttStatus::Stopped);
+        debug!("MQTT supervisor stopped");
         Ok(())
+    }
+}
+
+fn shutdown_sequence_result(result: Option<Result<(), MqttError>>) -> Result<(), MqttError> {
+    match result {
+        Some(result) => result,
+        None => {
+            warn!("graceful MQTT shutdown timed out");
+            Ok(())
+        }
+    }
+}
+
+/// Atomically allocates and coalesces a latest-only collection request.
+pub(crate) fn request_collection(sender: &watch::Sender<u64>) -> u64 {
+    let mut request_id = 0_u64;
+    sender.send_modify(|current| {
+        request_id = current.saturating_add(1);
+        *current = request_id;
+    });
+    request_id
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetryReason {
+    AuthenticationRejected,
+    BrokerRejected,
+    Transport,
+}
+
+fn retry_reason(error: &ConnectionError) -> RetryReason {
+    match error {
+        ConnectionError::ConnectionRefused(
+            ConnectReturnCode::BadUserNamePassword | ConnectReturnCode::NotAuthorized,
+        ) => RetryReason::AuthenticationRejected,
+        ConnectionError::ConnectionRefused(_) => RetryReason::BrokerRejected,
+        _ => RetryReason::Transport,
     }
 }
 
@@ -406,8 +465,10 @@ enum Phase {
     AwaitFreshState,
     StateQueued,
     Online,
-    OfflineQueued,
-    OfflineAwaitAck(u16),
+    ShutdownAwaitOfflineOutgoing {
+        skip_queued_publish: bool,
+    },
+    ShutdownAwaitOfflineAck(u16),
     DisconnectQueued,
     Stopped,
 }
@@ -426,12 +487,14 @@ struct BootstrapMachine {
     phase: Phase,
     required_request: u64,
     last_state_request: u64,
+    bootstrap_state_queued: bool,
     became_online: bool,
 }
 
 impl BootstrapMachine {
     fn connected(&mut self, required_request: u64) -> ProtocolAction {
         self.required_request = required_request;
+        self.bootstrap_state_queued = false;
         self.became_online = false;
         self.phase = Phase::DiscoveryQueued;
         ProtocolAction::PublishDiscovery
@@ -447,10 +510,19 @@ impl BootstrapMachine {
             }
             Phase::StateQueued if packet_id == 0 => {
                 self.phase = Phase::Online;
-                self.became_online = true;
+                self.became_online = std::mem::take(&mut self.bootstrap_state_queued);
             }
-            Phase::OfflineQueued if packet_id != 0 => {
-                self.phase = Phase::OfflineAwaitAck(packet_id);
+            Phase::ShutdownAwaitOfflineOutgoing {
+                skip_queued_publish: true,
+            } => {
+                self.phase = Phase::ShutdownAwaitOfflineOutgoing {
+                    skip_queued_publish: false,
+                };
+            }
+            Phase::ShutdownAwaitOfflineOutgoing {
+                skip_queued_publish: false,
+            } if packet_id != 0 => {
+                self.phase = Phase::ShutdownAwaitOfflineAck(packet_id);
             }
             _ => {}
         }
@@ -467,7 +539,7 @@ impl BootstrapMachine {
                 self.phase = Phase::AwaitFreshState;
                 None
             }
-            Phase::OfflineAwaitAck(expected) if expected == packet_id => {
+            Phase::ShutdownAwaitOfflineAck(expected) if expected == packet_id => {
                 self.phase = Phase::DisconnectQueued;
                 Some(ProtocolAction::Disconnect)
             }
@@ -482,6 +554,7 @@ impl BootstrapMachine {
             _ => false,
         };
         if allowed {
+            self.bootstrap_state_queued = self.phase == Phase::AwaitFreshState;
             self.last_state_request = request_id;
             self.became_online = false;
             self.phase = Phase::StateQueued;
@@ -497,8 +570,17 @@ impl BootstrapMachine {
                 self.phase = Phase::Stopped;
                 None
             }
+            Phase::ShutdownAwaitOfflineOutgoing { .. }
+            | Phase::ShutdownAwaitOfflineAck(_)
+            | Phase::DisconnectQueued => None,
             _ => {
-                self.phase = Phase::OfflineQueued;
+                let skip_queued_publish = matches!(
+                    self.phase,
+                    Phase::DiscoveryQueued | Phase::OnlineQueued | Phase::StateQueued
+                );
+                self.phase = Phase::ShutdownAwaitOfflineOutgoing {
+                    skip_queued_publish,
+                };
                 Some(ProtocolAction::PublishOffline)
             }
         }
@@ -511,6 +593,7 @@ impl BootstrapMachine {
 
     fn connection_lost(&mut self) {
         self.phase = Phase::Disconnected;
+        self.bootstrap_state_queued = false;
         self.became_online = false;
     }
 
@@ -588,6 +671,8 @@ mod tests {
         );
         machine.outgoing_publish(0);
         assert!(machine.is_online());
+        assert!(machine.just_became_online());
+        assert!(!machine.just_became_online());
     }
 
     #[test]
@@ -604,6 +689,7 @@ mod tests {
         );
         assert_eq!(machine.state_available(22), None);
         machine.outgoing_publish(0);
+        assert!(!machine.just_became_online());
         assert_eq!(
             machine.state_available(22),
             Some(ProtocolAction::PublishState)
@@ -646,10 +732,84 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_identifies_its_own_publish_from_every_bootstrap_phase() {
+        let cases = [
+            (Phase::DiscoveryQueued, Some(7), Some(7)),
+            (Phase::DiscoveryAwaitAck(7), None, Some(7)),
+            (Phase::OnlineQueued, Some(8), Some(8)),
+            (Phase::OnlineAwaitAck(8), None, Some(8)),
+            (Phase::AwaitFreshState, None, None),
+            (Phase::StateQueued, Some(0), None),
+            (Phase::Online, None, None),
+        ];
+
+        for (phase, queued_packet, stale_acknowledgement) in cases {
+            let mut machine = BootstrapMachine {
+                phase,
+                ..BootstrapMachine::default()
+            };
+            assert_eq!(
+                machine.shutdown(),
+                Some(ProtocolAction::PublishOffline),
+                "phase: {phase:?}"
+            );
+            if let Some(packet_id) = queued_packet {
+                machine.outgoing_publish(packet_id);
+            }
+            machine.outgoing_publish(31);
+            assert_eq!(
+                machine.phase,
+                Phase::ShutdownAwaitOfflineAck(31),
+                "phase: {phase:?}"
+            );
+            if let Some(packet_id) = stale_acknowledgement {
+                assert_eq!(machine.publish_acknowledged(packet_id), None);
+            }
+            assert_eq!(machine.publish_acknowledged(30), None);
+            assert_eq!(
+                machine.publish_acknowledged(31),
+                Some(ProtocolAction::Disconnect)
+            );
+        }
+    }
+
+    #[test]
     fn disconnected_shutdown_stops_without_publication() {
         let mut machine = BootstrapMachine::default();
         assert_eq!(machine.shutdown(), None);
         assert!(machine.is_stopped());
+    }
+
+    #[test]
+    fn shutdown_propagates_internal_control_failures() {
+        assert_eq!(
+            shutdown_sequence_result(Some(Err(MqttError::ControlQueueUnavailable))),
+            Err(MqttError::ControlQueueUnavailable)
+        );
+        assert_eq!(shutdown_sequence_result(Some(Ok(()))), Ok(()));
+        assert_eq!(shutdown_sequence_result(None), Ok(()));
+    }
+
+    #[test]
+    fn connection_rejections_are_classified_without_details() {
+        assert_eq!(
+            retry_reason(&ConnectionError::ConnectionRefused(
+                ConnectReturnCode::BadUserNamePassword
+            )),
+            RetryReason::AuthenticationRejected
+        );
+        assert_eq!(
+            retry_reason(&ConnectionError::ConnectionRefused(
+                ConnectReturnCode::NotAuthorized
+            )),
+            RetryReason::AuthenticationRejected
+        );
+        assert_eq!(
+            retry_reason(&ConnectionError::ConnectionRefused(
+                ConnectReturnCode::BadClientId
+            )),
+            RetryReason::BrokerRejected
+        );
     }
 
     #[test]

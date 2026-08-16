@@ -61,6 +61,8 @@ COPY . .
 RUN --mount=type=cache,id=rpi-health-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=rpi-health-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     cargo test --locked --test mqtt_integration --no-run \
+    && cargo build --locked --bin rpi-health-mqtt \
+    && cp target/debug/rpi-health-mqtt /usr/local/bin/rpi-health-mqtt \
     && find target/debug/deps -maxdepth 1 -type f -name 'mqtt_integration-*' -perm /111 \
        -exec cp '{}' /usr/local/bin/mqtt-integration-test ';'
 ENTRYPOINT ["/usr/local/bin/mqtt-integration-test"]
