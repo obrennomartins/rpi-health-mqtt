@@ -12,6 +12,7 @@ use std::{
 };
 
 use rpi_health_mqtt::{
+    cli::{CONFIG_ERROR, DIAGNOSTIC_ERROR, SUCCESS},
     config::{Config, MqttCredentials},
     discovery::{build_discovery_message, DiscoverySettings},
     model::ObservationTime,
@@ -24,7 +25,7 @@ use rustix::process::{kill_process, Pid, Signal};
 use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
-    sync::watch,
+    sync::{mpsc, watch},
     task::JoinHandle,
 };
 
@@ -34,6 +35,7 @@ const BASE_TOPIC: &str = "example/monitor/example-pi";
 const DISCOVERY_TOPIC: &str = "homeassistant/device/example-pi/config";
 const DAEMON_DISCOVERY_PREFIX: &str = "integration/discovery";
 const SERVICE_BINARY: &str = "/usr/local/bin/rpi-health-mqtt";
+const DIAGNOSTIC_CANARY: &str = "diagnostic-secret-canary-never-render";
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires the Docker validation broker"]
@@ -296,6 +298,268 @@ async fn daemon_binary_recovers_and_obeys_process_lifecycle_contract() {
 
     drop(abrupt_fixture);
     proxy.stop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires the Docker validation broker and service binary"]
+async fn diagnostics_binary_is_bounded_secret_safe_and_never_publishes() {
+    let host = std::env::var("MQTT_TEST_HOST").expect("broker host must be configured");
+    let port = std::env::var("MQTT_TEST_PORT")
+        .expect("broker port must be configured")
+        .parse::<u16>()
+        .expect("broker port must be numeric");
+
+    let (observer_client, mut observer_events) =
+        observer(&host, port, "diagnostics-observer", PASSWORD);
+    connect(&mut observer_events).await;
+    observer_client
+        .subscribe("integration/diagnostics/#", QoS::AtLeastOnce)
+        .await
+        .expect("diagnostics observer subscription should queue");
+    wait_for_subscription(&mut observer_events).await;
+    let (publication_tx, mut publication_rx) = mpsc::unbounded_channel();
+    let observer_task = tokio::spawn(async move {
+        while let Ok(event) = observer_events.poll().await {
+            if let Event::Incoming(Incoming::Publish(publish)) = event {
+                let _ = publication_tx.send(publish);
+            }
+        }
+    });
+
+    let success = DiagnosticFixture::new("success", &host, port, PASSWORD, 0o600);
+    let (output, elapsed) = run_diagnostic(&success.config_path, &[], Duration::from_secs(7)).await;
+    assert_eq!(output.status.code(), Some(i32::from(SUCCESS)));
+    assert!(elapsed < Duration::from_secs(5));
+    let report = output_text(&output.stdout);
+    assert!(report.contains("[PASS] credentials:"));
+    assert!(report.contains("[PASS] runtime identity:"));
+    assert!(report.contains("[WARNING] architecture: running on x86_64"));
+    assert!(report.contains("collector:"));
+    assert!(report.contains("[PASS] mqtt:"));
+    assert!(!report.contains("[FAILURE]"));
+    assert!(output.stderr.is_empty());
+    assert_secret_absent(&output, DIAGNOSTIC_CANARY);
+
+    let unused_listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("an unused local port should be reserved");
+    let unavailable_port = unused_listener
+        .local_addr()
+        .expect("unused listener should have an address")
+        .port();
+    drop(unused_listener);
+
+    let skipped = DiagnosticFixture::new("skipped", "127.0.0.1", unavailable_port, PASSWORD, 0o600);
+    let (output, elapsed) = run_diagnostic(
+        &skipped.config_path,
+        &["--skip-mqtt"],
+        Duration::from_secs(7),
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(i32::from(SUCCESS)));
+    assert!(elapsed < Duration::from_secs(5));
+    assert!(output_text(&output.stdout).contains("[SKIPPED] mqtt:"));
+    assert!(output.stderr.is_empty());
+
+    let rejected = DiagnosticFixture::new("rejected", &host, port, DIAGNOSTIC_CANARY, 0o600);
+    let (output, elapsed) =
+        run_diagnostic(&rejected.config_path, &[], Duration::from_secs(7)).await;
+    assert_eq!(output.status.code(), Some(i32::from(DIAGNOSTIC_ERROR)));
+    assert!(elapsed < Duration::from_secs(5));
+    assert!(output_text(&output.stdout).contains("[FAILURE] mqtt:"));
+    assert!(output.stderr.is_empty());
+    assert_secret_absent(&output, DIAGNOSTIC_CANARY);
+
+    let unavailable = DiagnosticFixture::new(
+        "unavailable",
+        "127.0.0.1",
+        unavailable_port,
+        DIAGNOSTIC_CANARY,
+        0o600,
+    );
+    let (output, elapsed) =
+        run_diagnostic(&unavailable.config_path, &[], Duration::from_secs(7)).await;
+    assert_eq!(output.status.code(), Some(i32::from(DIAGNOSTIC_ERROR)));
+    assert!(elapsed < Duration::from_secs(5));
+    assert!(output_text(&output.stdout).contains("[FAILURE] mqtt:"));
+    assert!(output.stderr.is_empty());
+    assert_secret_absent(&output, DIAGNOSTIC_CANARY);
+
+    let unsafe_credential = DiagnosticFixture::new("unsafe", &host, port, DIAGNOSTIC_CANARY, 0o644);
+    let (output, elapsed) =
+        run_diagnostic(&unsafe_credential.config_path, &[], Duration::from_secs(7)).await;
+    assert_eq!(output.status.code(), Some(i32::from(DIAGNOSTIC_ERROR)));
+    assert!(elapsed < Duration::from_secs(5));
+    let report = output_text(&output.stdout);
+    assert!(report.contains("[FAILURE] credentials:"));
+    assert!(report.contains("[SKIPPED] mqtt:"));
+    assert!(output.stderr.is_empty());
+    assert_secret_absent(&output, DIAGNOSTIC_CANARY);
+
+    let invalid = DiagnosticFixture::new("invalid", &host, port, DIAGNOSTIC_CANARY, 0o600);
+    fs::write(&invalid.config_path, "invalid = [\n")
+        .expect("invalid configuration fixture should be written");
+    let (output, elapsed) = run_diagnostic(&invalid.config_path, &[], Duration::from_secs(3)).await;
+    assert_eq!(output.status.code(), Some(i32::from(CONFIG_ERROR)));
+    assert!(elapsed < Duration::from_secs(2));
+    assert!(output.stdout.is_empty());
+    assert!(output_text(&output.stderr).starts_with("Configuration error:"));
+    assert_secret_absent(&output, DIAGNOSTIC_CANARY);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        publication_rx.try_recv().is_err(),
+        "the diagnostics command must not publish MQTT messages"
+    );
+    observer_task.abort();
+    let _ = observer_task.await;
+}
+
+struct DiagnosticFixture {
+    directory: PathBuf,
+    config_path: PathBuf,
+}
+
+impl DiagnosticFixture {
+    fn new(case: &str, host: &str, port: u16, password: &str, password_mode: u32) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "rpi-health-mqtt-diagnostics-integration-{}-{case}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).expect("diagnostics fixture directory should be created");
+
+        let password_path = directory.join("mqtt-password");
+        fs::write(&password_path, format!("{password}\n"))
+            .expect("diagnostics password fixture should be written");
+        fs::set_permissions(&password_path, fs::Permissions::from_mode(password_mode))
+            .expect("diagnostics password permissions should be configured");
+
+        let vcgencmd_path = directory.join("vcgencmd");
+        fs::write(
+            &vcgencmd_path,
+            br#"#!/bin/sh
+case "$1" in
+  get_throttled)
+    printf '%s\n' 'throttled=0x0'
+    ;;
+  measure_temp)
+    printf '%s\n' "temp=42.0'C"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+"#,
+        )
+        .expect("fake firmware command should be written");
+        fs::set_permissions(&vcgencmd_path, fs::Permissions::from_mode(0o700))
+            .expect("fake firmware command should be executable");
+
+        let config_path = directory.join("config.toml");
+        let config = format!(
+            r#"
+[device]
+id = "diagnostics-{case}"
+name = "Diagnostics Raspberry Pi"
+
+[mqtt]
+host = "{host}"
+port = {port}
+client_id = "rpi-health-mqtt-diagnostics-{case}"
+username = "{USERNAME}"
+password_file = "{}"
+base_topic = "integration/diagnostics/{case}"
+discovery_prefix = "integration/diagnostics/discovery"
+keep_alive_seconds = 5
+
+[collector]
+interval_seconds = 30
+root_filesystem = "/"
+vcgencmd_path = "{}"
+command_timeout_seconds = 2
+"#,
+            password_path.display(),
+            vcgencmd_path.display(),
+        );
+        fs::write(&config_path, config).expect("diagnostics configuration should be written");
+
+        Self {
+            directory,
+            config_path,
+        }
+    }
+}
+
+impl Drop for DiagnosticFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+async fn run_diagnostic(
+    config_path: &Path,
+    check_arguments: &[&str],
+    timeout: Duration,
+) -> (Output, Duration) {
+    let binary =
+        std::env::var("RPI_HEALTH_MQTT_TEST_BINARY").unwrap_or_else(|_| SERVICE_BINARY.to_owned());
+    let mut process = Command::new(binary)
+        .arg("--config")
+        .arg(config_path)
+        .arg("check")
+        .args(check_arguments)
+        .env("RUST_LOG", "info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("diagnostics process should start");
+    let started = StdInstant::now();
+
+    loop {
+        if process
+            .try_wait()
+            .expect("diagnostics process status should be readable")
+            .is_some()
+        {
+            let output = process
+                .wait_with_output()
+                .expect("diagnostics output should be collected");
+            return (output, started.elapsed());
+        }
+        if started.elapsed() >= timeout {
+            let _ = process.kill();
+            let _ = process.wait();
+            panic!("diagnostics process exceeded its test deadline");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn output_text(bytes: &[u8]) -> String {
+    String::from_utf8(bytes.to_vec()).expect("service output should be UTF-8")
+}
+
+fn assert_secret_absent(output: &Output, secret: &str) {
+    assert!(
+        !output
+            .stdout
+            .windows(secret.len())
+            .any(|value| value == secret.as_bytes()),
+        "diagnostics stdout must not expose the credential canary"
+    );
+    assert!(
+        !output
+            .stderr
+            .windows(secret.len())
+            .any(|value| value == secret.as_bytes()),
+        "diagnostics stderr must not expose the credential canary"
+    );
 }
 
 struct BootstrapPublications {

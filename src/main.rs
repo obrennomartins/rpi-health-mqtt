@@ -8,6 +8,7 @@ use rpi_health_mqtt::{
     collector::Collector,
     config::{Config, MqttCredentials},
     daemon,
+    diagnostics::{self, MqttProbe},
 };
 
 fn main() -> ExitCode {
@@ -37,16 +38,7 @@ fn run(cli: Cli) -> u8 {
 
     match cli.command {
         Some(Command::PrintOnce) => print_once(config.collector()),
-        Some(Command::Check) => match MqttCredentials::load(config.mqtt()) {
-            Ok(_) => {
-                println!("Configuration and credential file are valid.");
-                SUCCESS
-            }
-            Err(error) => {
-                eprintln!("Configuration error: {error}");
-                DIAGNOSTIC_ERROR
-            }
-        },
+        Some(Command::Check { skip_mqtt }) => run_diagnostics(&config, skip_mqtt),
         None => match MqttCredentials::load(config.mqtt()) {
             Ok(credentials) => match daemon::run(config, credentials) {
                 Ok(()) => SUCCESS,
@@ -61,6 +53,28 @@ fn run(cli: Cli) -> u8 {
             }
         },
     }
+}
+
+fn run_diagnostics(config: &Config, skip_mqtt: bool) -> u8 {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            println!("[FAILURE] runtime: diagnostic runtime could not start");
+            return DIAGNOSTIC_ERROR;
+        }
+    };
+    let mqtt_probe = if skip_mqtt {
+        MqttProbe::Skipped
+    } else {
+        MqttProbe::Enabled
+    };
+    let report = runtime.block_on(diagnostics::run_checks(config, mqtt_probe));
+    println!("{report}");
+    report.exit_code()
 }
 
 fn print_once(config: &rpi_health_mqtt::config::CollectorConfig) -> u8 {

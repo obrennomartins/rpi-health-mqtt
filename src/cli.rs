@@ -40,7 +40,11 @@ pub struct Cli {
 #[derive(Clone, Copy, Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
     /// Validate configuration, credentials, dependencies, and connectivity.
-    Check,
+    Check {
+        /// Skip the bounded MQTT connectivity probe.
+        #[arg(long)]
+        skip_mqtt: bool,
+    },
     /// Collect one snapshot as JSON without connecting to MQTT.
     PrintOnce,
 }
@@ -64,8 +68,16 @@ mod tests {
         ] {
             let cli = Cli::try_parse_from(arguments).expect("arguments should parse");
             assert_eq!(cli.config, PathBuf::from("/tmp/example.toml"));
-            assert_eq!(cli.command, Some(Command::Check));
+            assert_eq!(cli.command, Some(Command::Check { skip_mqtt: false }));
         }
+    }
+
+    #[test]
+    fn check_can_skip_only_the_mqtt_probe() {
+        let cli = Cli::try_parse_from(["rpi-health-mqtt", "check", "--skip-mqtt"])
+            .expect("check arguments should parse");
+
+        assert_eq!(cli.command, Some(Command::Check { skip_mqtt: true }));
     }
 
     #[test]
