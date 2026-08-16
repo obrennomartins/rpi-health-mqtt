@@ -146,6 +146,11 @@ or:
 ./scripts/validate-delivery.sh
 ```
 
+In a TLS-inspecting environment, set `DOCKER_BUILD_CA_CERT` to a trusted CA
+certificate in DER or PEM format before running a Docker gate. The validation
+scripts copy it only to the ignored `.local/docker-ca.cer` path and mount it as
+a BuildKit secret. Never commit that certificate.
+
 The gate checks formatting, all targets and features, Clippy, rustdoc, an ARMv7
 release artifact and hard-float ABI, QEMU execution, and the authenticated MQTT
 lifecycle against an isolated Mosquitto container. These checks validate the

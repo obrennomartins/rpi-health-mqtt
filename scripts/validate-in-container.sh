@@ -9,6 +9,9 @@ case "${mode}" in
     shellcheck \
       scripts/install.sh \
       scripts/uninstall.sh \
+      scripts/validate-ci-in-container.sh \
+      scripts/validate-ci.sh \
+      scripts/validate-delivery.sh \
       scripts/validate-docs.sh \
       scripts/validate-in-container.sh \
       tests/install/fake-dpkg.sh \

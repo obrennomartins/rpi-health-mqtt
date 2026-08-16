@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-lint:
+    name: Workflow syntax
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint with ShellCheck
+        run: |
+          docker run --rm \
+            --mount "type=bind,source=${PWD},target=/repo,readonly" \
+            --workdir /repo \
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color
+
+  docker-validation:
+    name: Docker validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: workflow-lint
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: v0.36.1
+          driver-opts: |
+            image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+
+      - name: Run the complete validation gate
+        run: |
+          bash scripts/validate-delivery.sh
+          bash scripts/validate-ci.sh
+          if [[ -f scripts/validate-release.sh ]]; then
+            bash scripts/validate-release.sh
+          fi

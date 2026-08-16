@@ -20,6 +20,8 @@ services:
       context: ..
       dockerfile: docker/verify.Dockerfile
       target: integration
+      args:
+        CACHE_REVISION: ${CACHE_REVISION:-none}
       secrets:
         - host_ca
     environment:

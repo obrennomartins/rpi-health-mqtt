@@ -1,0 +1,115 @@
+name: Supply Chain
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - deny.toml
+      - .github/workflows/supply-chain.yml
+  pull_request:
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - deny.toml
+      - .github/workflows/supply-chain.yml
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    name: RustSec audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download and verify cargo-audit
+        shell: bash
+        run: |
+          version=0.22.2
+          archive="cargo-audit-x86_64-unknown-linux-gnu-v${version}.tgz"
+          url="https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${version}/${archive}"
+          expected_sha256=ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
+
+          mkdir -p .local/cargo-audit
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output ".local/${archive}" \
+            "${url}"
+          printf '%s  %s\n' "${expected_sha256}" ".local/${archive}" \
+            | sha256sum --check --strict
+          tar -xzf ".local/${archive}" \
+            --strip-components=1 \
+            -C .local/cargo-audit
+          test "$(.local/cargo-audit/cargo-audit --version)" = "cargo-audit ${version}"
+
+      - name: Audit the lockfile with RustSec
+        run: .local/cargo-audit/cargo-audit audit --file Cargo.lock --deny warnings
+
+  cargo-deny:
+    name: Advisories, licenses, bans, and sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select the supported Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup override set 1.97.1
+
+      - name: Download and verify cargo-deny
+        shell: bash
+        run: |
+          version=0.20.2
+          archive="cargo-deny-${version}-x86_64-unknown-linux-musl.tar.gz"
+          url="https://github.com/EmbarkStudios/cargo-deny/releases/download/${version}/${archive}"
+          expected_sha256=9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+
+          mkdir -p .local/cargo-deny
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output ".local/${archive}" \
+            "${url}"
+          printf '%s  %s\n' "${expected_sha256}" ".local/${archive}" \
+            | sha256sum --check --strict
+          tar -xzf ".local/${archive}" \
+            --strip-components=1 \
+            -C .local/cargo-deny
+          test "$(.local/cargo-deny/cargo-deny --version)" = "cargo-deny ${version}"
+
+      - name: Check the locked dependency graph
+        run: .local/cargo-deny/cargo-deny --all-features --locked check
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reject vulnerable dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate

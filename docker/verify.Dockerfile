@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.12.0@sha256:db1ff77fb637a5955317c7a3a62540196396d565f3dd5742e76dddbb6d75c4c5
 
-FROM docker.io/library/eclipse-mosquitto:2.0.22@sha256:212f89e1eaeb2c322d6441b64396e3346026674db8fa9c27beac293405c32b3c AS broker-validation
+FROM docker.io/library/eclipse-mosquitto:2.1.2-alpine@sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797 AS broker-validation
 
 COPY --chown=mosquitto:mosquitto --chmod=0600 docker/mosquitto/ /mosquitto/config/
 
@@ -12,7 +12,13 @@ FROM docker.io/library/rust:1.97.1-bullseye@sha256:90c2e6cd1f970487175cef2893e94
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update \
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260803T000000Z bullseye main' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260803T000000Z bullseye-security main' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260803T000000Z bullseye-updates main' \
+        > /etc/apt/sources.list \
+    && apt-get update \
     && apt-get install --yes --no-install-recommends \
         binutils-arm-linux-gnueabihf \
         ca-certificates \
@@ -25,7 +31,10 @@ RUN apt-get update \
         systemd \
     && rm -rf /var/lib/apt/lists/*
 
+ARG CACHE_REVISION=none
+
 RUN --mount=type=secret,id=host_ca \
+    test -n "${CACHE_REVISION}"; \
     if [ -s /run/secrets/host_ca ]; then \
         if ! openssl x509 -inform DER -in /run/secrets/host_ca \
             -out /usr/local/share/ca-certificates/local-build-ca.crt; then \
@@ -86,7 +95,13 @@ FROM docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update \
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260803T000000Z bookworm main' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260803T000000Z bookworm-security main' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260803T000000Z bookworm-updates main' \
+        > /etc/apt/sources.list \
+    && apt-get update \
     && apt-get install --yes --no-install-recommends systemd \
     && rm -rf /var/lib/apt/lists/*
 

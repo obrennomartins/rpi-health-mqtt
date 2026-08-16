@@ -368,6 +368,11 @@ does not create a tag, publish a release, or contact a production broker.
 Docker must use the Linux engine and provide Buildx and Compose. Validation
 uses only synthetic example identities and credentials.
 
+In a TLS-inspecting environment, set `DOCKER_BUILD_CA_CERT` to a trusted CA
+certificate in DER or PEM format before running a Docker gate. The validation
+scripts copy it only to the ignored `.local/docker-ca.cer` path and mount it as
+a BuildKit secret. Never commit that certificate.
+
 Public Markdown can also be checked without network access:
 
 ```sh

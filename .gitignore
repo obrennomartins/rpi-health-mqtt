@@ -4,10 +4,13 @@
 !/.github/
 !/.github/**
 !/.gitignore
+**/.env*
 
 /HANDOFF.md
 /target/
 /coverage/
+/dist/
+/sbom-input/
 /config/config.toml
 *.local.toml
 *.log

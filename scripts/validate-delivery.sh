@@ -13,8 +13,9 @@ if [[ -n "${DOCKER_BUILD_CA_CERT:-}" ]]; then
 elif [[ ! -f ".local/docker-ca.cer" ]]; then
   : > .local/docker-ca.cer
 fi
+cache_revision="$(sha256sum -- .local/docker-ca.cer | awk '{print $1}')"
 
-docker buildx bake verify --progress=plain
+CACHE_REVISION="${cache_revision}" docker buildx bake verify --progress=plain
 
 compose_file="docker/compose.validation.yml"
 if [[ -f "${compose_file}" ]]; then
@@ -22,5 +23,5 @@ if [[ -f "${compose_file}" ]]; then
     docker compose --file "${compose_file}" down --volumes --remove-orphans
   }
   trap cleanup EXIT
-  docker compose --file "${compose_file}" up --build --abort-on-container-exit --exit-code-from integration
+  CACHE_REVISION="${cache_revision}" docker compose --file "${compose_file}" up --build --abort-on-container-exit --exit-code-from integration
 fi

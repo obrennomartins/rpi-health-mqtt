@@ -1,3 +1,7 @@
+variable "CACHE_REVISION" {
+  default = "none"
+}
+
 group "verify" {
   targets = ["verify-amd64", "verify-armv7", "verify-markdown", "verify-systemd-bookworm"]
 }
@@ -7,6 +11,9 @@ target "common" {
   dockerfile = "docker/verify.Dockerfile"
   platforms  = ["linux/amd64"]
   secret     = ["id=host_ca,src=.local/docker-ca.cer"]
+  args = {
+    CACHE_REVISION = "${CACHE_REVISION}"
+  }
 }
 
 target "verify-amd64" {
