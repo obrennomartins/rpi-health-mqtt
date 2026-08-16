@@ -36,14 +36,14 @@ COPY . .
 
 FROM toolchain AS verify-amd64
 COPY . .
-RUN --mount=type=cache,id=rpi-health-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=rpi-health-cargo-git,target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=rpi-health-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=rpi-health-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=rpi-health-target-amd64,target=/workspace/target \
     bash scripts/validate-in-container.sh amd64
 
 FROM toolchain AS verify-armv7
 COPY . .
-RUN --mount=type=cache,id=rpi-health-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=rpi-health-cargo-git,target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=rpi-health-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=rpi-health-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=rpi-health-target-armv7,target=/workspace/target \
     bash scripts/validate-in-container.sh armv7

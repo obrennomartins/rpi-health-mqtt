@@ -1,0 +1,22 @@
+# Copy this file to /etc/rpi-health-mqtt/config.toml and adjust it locally.
+# Keep the MQTT password only in the separate password_file.
+
+[device]
+id = "example-pi"
+name = "Example Raspberry Pi"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+client_id = "rpi-health-mqtt-example-pi"
+username = "monitor-example"
+password_file = "/etc/rpi-health-mqtt/mqtt-password"
+base_topic = "example/monitor/example-pi"
+discovery_prefix = "homeassistant"
+keep_alive_seconds = 30
+
+[collector]
+interval_seconds = 30
+root_filesystem = "/"
+vcgencmd_path = "/usr/bin/vcgencmd"
+command_timeout_seconds = 2
