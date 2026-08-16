@@ -7,18 +7,24 @@ mode="${1:?validation mode is required}"
 case "${mode}" in
   amd64)
     shellcheck \
+      scripts/generate-release-sbom.sh \
       scripts/install.sh \
+      scripts/package-release.sh \
       scripts/uninstall.sh \
       scripts/validate-ci-in-container.sh \
       scripts/validate-ci.sh \
       scripts/validate-delivery.sh \
       scripts/validate-docs.sh \
       scripts/validate-in-container.sh \
+      scripts/validate-release.sh \
+      scripts/verify-release-archive.sh \
+      scripts/verify-release-tag.sh \
       tests/install/fake-dpkg.sh \
       tests/install/fake-systemctl.sh \
       tests/install/fake-uname.sh \
       tests/install/run.sh \
-      tests/install/verify-systemd-unit.sh
+      tests/install/verify-systemd-unit.sh \
+      tests/release/run.sh
     DOCS_REQUIRE_CODESPELL=1 bash scripts/validate-docs.sh
     cargo fmt --all -- --check
     cargo test --all-targets --all-features --locked
