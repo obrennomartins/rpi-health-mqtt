@@ -1,0 +1,5 @@
+throttled=0x0
+throttled=0x1
+throttled=0x10000
+throttled=0x50005
+throttled=0xA000A

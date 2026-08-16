@@ -1,0 +1,6 @@
+processor       : 0
+model name      : ARMv7 Processor rev 5 (v7l)
+Features        : half thumb fastmult vfp edsp neon vfpv3 tls
+Hardware        : Example ARM Board
+Revision        : a02082
+Serial          : 0000000000000001

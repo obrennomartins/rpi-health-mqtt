@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod metrics;
 pub mod model;
 
 /// The service version embedded at compile time.
