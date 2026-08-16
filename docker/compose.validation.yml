@@ -1,0 +1,39 @@
+services:
+  broker:
+    build:
+      context: ..
+      dockerfile: docker/verify.Dockerfile
+      target: broker-validation
+    read_only: true
+    tmpfs:
+      - /mosquitto/data
+      - /mosquitto/log
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "127.0.0.1", "-u", "monitor-example", "-P", "test-only-password", "-t", "integration/health", "-m", "ready"]
+      interval: 1s
+      timeout: 2s
+      retries: 20
+    networks: [validation]
+
+  integration:
+    build:
+      context: ..
+      dockerfile: docker/verify.Dockerfile
+      target: integration
+      secrets:
+        - host_ca
+    environment:
+      MQTT_TEST_HOST: broker
+      MQTT_TEST_PORT: "1883"
+    depends_on:
+      broker:
+        condition: service_healthy
+    networks: [validation]
+
+networks:
+  validation:
+    internal: true
+
+secrets:
+  host_ca:
+    file: ../.local/docker-ca.cer

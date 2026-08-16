@@ -11,6 +11,7 @@ pub mod config;
 pub mod discovery;
 pub mod metrics;
 pub mod model;
+pub mod mqtt;
 
 /// The service version embedded at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

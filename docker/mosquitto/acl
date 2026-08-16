@@ -1,0 +1,4 @@
+user monitor-example
+topic readwrite integration/#
+topic readwrite example/monitor/example-pi/#
+topic readwrite homeassistant/device/example-pi/config

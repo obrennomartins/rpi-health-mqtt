@@ -1,5 +1,13 @@
 # syntax=docker/dockerfile:1.12
 
+FROM docker.io/library/eclipse-mosquitto:2.0.22@sha256:212f89e1eaeb2c322d6441b64396e3346026674db8fa9c27beac293405c32b3c AS broker-validation
+
+COPY --chown=mosquitto:mosquitto --chmod=0600 docker/mosquitto/ /mosquitto/config/
+
+USER mosquitto
+ENTRYPOINT ["mosquitto"]
+CMD ["-c", "/mosquitto/config/mosquitto.conf"]
+
 FROM docker.io/library/rust:1.97.1-bullseye@sha256:90c2e6cd1f970487175cef2893e9429cb7bd3f20d344fe1941bb7dac6208b11f AS toolchain
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -47,3 +55,13 @@ RUN --mount=type=cache,id=rpi-health-cargo-registry,target=/usr/local/cargo/regi
     --mount=type=cache,id=rpi-health-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=rpi-health-target-armv7,target=/workspace/target \
     bash scripts/validate-in-container.sh armv7
+
+FROM toolchain AS integration
+COPY . .
+RUN --mount=type=cache,id=rpi-health-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=rpi-health-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo test --locked --test mqtt_integration --no-run \
+    && find target/debug/deps -maxdepth 1 -type f -name 'mqtt_integration-*' -perm /111 \
+       -exec cp '{}' /usr/local/bin/mqtt-integration-test ';'
+ENTRYPOINT ["/usr/local/bin/mqtt-integration-test"]
+CMD ["--ignored", "--test-threads=1"]
