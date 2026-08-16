@@ -1,0 +1,47 @@
+[Unit]
+Description=Raspberry Pi health monitor over MQTT
+Wants=network-online.target
+After=network-online.target mosquitto.service
+
+[Service]
+Type=simple
+User=rpi-health-mqtt
+Group=rpi-health-mqtt
+SupplementaryGroups=video
+ExecStart=/usr/local/bin/rpi-health-mqtt --config /etc/rpi-health-mqtt/config.toml
+Restart=always
+RestartSec=5s
+TimeoutStopSec=10s
+UMask=0077
+Environment=RUST_LOG=info
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateMounts=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+KeyringMode=private
+RemoveIPC=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# PrivateDevices is intentionally omitted because vcgencmd may require /dev/vcio.
+
+[Install]
+WantedBy=multi-user.target

@@ -244,6 +244,9 @@ impl MqttCredentials {
         if password.is_empty() {
             return Err(ConfigError::CredentialEmpty(path.to_path_buf()));
         }
+        if password.len() > usize::from(u16::MAX) {
+            return Err(ConfigError::CredentialTooLong(path.to_path_buf()));
+        }
         Ok(Self {
             username: config.username.clone(),
             password: SecretString::from(password.into_boxed_str()),
@@ -326,6 +329,9 @@ pub enum ConfigError {
     /// The credential becomes empty after removing its final line ending.
     #[error("credential file is empty: {0}")]
     CredentialEmpty(PathBuf),
+    /// The credential exceeds the MQTT UTF-8 field length limit.
+    #[error("credential exceeds the MQTT 65535-byte UTF-8 field limit: {0}")]
+    CredentialTooLong(PathBuf),
     /// The credential file has unsafe Unix permissions.
     #[error("credential file permissions are too broad: {0}")]
     CredentialPermissions(PathBuf),
@@ -575,7 +581,7 @@ fn sanitize_toml_error(error: &toml::de::Error) -> String {
 #[cfg(unix)]
 fn validate_secret_permissions(path: &Path, metadata: &fs::Metadata) -> Result<(), ConfigError> {
     use std::os::unix::fs::MetadataExt;
-    if metadata.mode() & 0o026 != 0 {
+    if metadata.mode() & 0o027 != 0 {
         return Err(ConfigError::CredentialPermissions(path.to_path_buf()));
     }
     Ok(())
@@ -725,6 +731,83 @@ base_topic = "example/monitor/example-pi"
         let debug = format!("{credentials:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains(sentinel));
+        fs::remove_dir_all(directory).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn credential_length_is_checked_after_removing_the_final_line_ending() {
+        let directory = temporary_directory();
+        fs::create_dir_all(&directory).expect("temporary directory should be created");
+        let password_path = directory.join("password");
+        fs::write(&password_path, []).expect("fixture should be created");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&password_path, fs::Permissions::from_mode(0o640))
+                .expect("fixture permissions should be restricted");
+        }
+        let source = VALID.replace(
+            "/etc/rpi-health-mqtt/mqtt-password",
+            password_path.to_str().expect("path is UTF-8"),
+        );
+        let config = Config::parse(&source).expect("configuration should be valid");
+
+        fs::write(&password_path, vec![b'x'; usize::from(u16::MAX)])
+            .expect("maximum-length credential should be written");
+        let credentials = MqttCredentials::load(config.mqtt())
+            .expect("a 65535-byte credential should be accepted");
+        assert_eq!(credentials.expose_password().len(), usize::from(u16::MAX));
+
+        let mut newline_terminated = vec![b'x'; usize::from(u16::MAX)];
+        newline_terminated.push(b'\n');
+        fs::write(&password_path, newline_terminated)
+            .expect("newline-terminated boundary credential should be written");
+        let credentials = MqttCredentials::load(config.mqtt())
+            .expect("a 65536-byte file ending in LF should be accepted");
+        assert_eq!(credentials.expose_password().len(), usize::from(u16::MAX));
+
+        let canary = "credential-length-canary-never-render";
+        let mut oversized = vec![b'x'; 65_536_usize - canary.len()];
+        oversized.extend_from_slice(canary.as_bytes());
+        fs::write(&password_path, oversized)
+            .expect("over-limit credential fixture should be written");
+        let error = MqttCredentials::load(config.mqtt())
+            .expect_err("a 65536-byte credential without a final newline must fail");
+        assert!(matches!(
+            &error,
+            ConfigError::CredentialTooLong(path) if path == &password_path
+        ));
+        assert!(!error.to_string().contains(canary));
+
+        fs::remove_dir_all(directory).expect("temporary directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_permissions_reject_every_other_user_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = temporary_directory();
+        fs::create_dir_all(&directory).expect("temporary directory should be created");
+        let password_path = directory.join("password");
+        fs::write(&password_path, "fixture-secret\n").expect("fixture should be written");
+        let source = VALID.replace(
+            "/etc/rpi-health-mqtt/mqtt-password",
+            password_path.to_str().expect("path is UTF-8"),
+        );
+        let config = Config::parse(&source).expect("configuration should be valid");
+
+        fs::set_permissions(&password_path, fs::Permissions::from_mode(0o641))
+            .expect("fixture permissions should be configured");
+        assert!(matches!(
+            MqttCredentials::load(config.mqtt()),
+            Err(ConfigError::CredentialPermissions(path)) if path == password_path
+        ));
+
+        fs::set_permissions(&password_path, fs::Permissions::from_mode(0o640))
+            .expect("fixture permissions should be restricted");
+        MqttCredentials::load(config.mqtt()).expect("mode 0640 should be accepted");
+
         fs::remove_dir_all(directory).expect("temporary directory should be removed");
     }
 

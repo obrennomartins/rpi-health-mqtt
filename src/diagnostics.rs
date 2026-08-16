@@ -249,6 +249,7 @@ fn credential_failure_summary(error: &ConfigError) -> &'static str {
         ConfigError::CredentialTooLarge(_) => "credential file exceeds the 64 KiB limit",
         ConfigError::CredentialEncoding(_) => "credential file is not valid UTF-8",
         ConfigError::CredentialEmpty(_) => "credential file is empty",
+        ConfigError::CredentialTooLong(_) => "credential exceeds the MQTT UTF-8 field limit",
         ConfigError::CredentialPermissions(_) => {
             "credential file grants access beyond its owner and group"
         }
@@ -815,11 +816,24 @@ mod tests {
             path: PathBuf::from(format!("/private/{CANARY_SECRET}")),
             source: io::Error::new(io::ErrorKind::PermissionDenied, CANARY_SECRET),
         };
-        let mut checks = vec![DiagnosticCheck::new(
-            CREDENTIALS_CHECK,
-            CheckStatus::Failure,
-            credential_failure_summary(&credential_error),
-        )];
+        let oversized_credential_error =
+            ConfigError::CredentialTooLong(PathBuf::from(format!("/private/{CANARY_SECRET}")));
+        assert_eq!(
+            credential_failure_summary(&oversized_credential_error),
+            "credential exceeds the MQTT UTF-8 field limit"
+        );
+        let mut checks = vec![
+            DiagnosticCheck::new(
+                CREDENTIALS_CHECK,
+                CheckStatus::Failure,
+                credential_failure_summary(&credential_error),
+            ),
+            DiagnosticCheck::new(
+                CREDENTIALS_CHECK,
+                CheckStatus::Failure,
+                credential_failure_summary(&oversized_credential_error),
+            ),
+        ];
         checks.extend([
             mqtt_failure_check(MqttProbeFailure::Rejected),
             mqtt_failure_check(MqttProbeFailure::Unreachable),

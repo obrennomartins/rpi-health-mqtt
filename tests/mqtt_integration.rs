@@ -12,7 +12,7 @@ use std::{
 };
 
 use rpi_health_mqtt::{
-    cli::{CONFIG_ERROR, DIAGNOSTIC_ERROR, SUCCESS},
+    cli::{COLLECTION_ERROR, CONFIG_ERROR, DIAGNOSTIC_ERROR, SUCCESS},
     config::{Config, MqttCredentials},
     discovery::{build_discovery_message, DiscoverySettings},
     model::ObservationTime,
@@ -36,6 +36,7 @@ const DISCOVERY_TOPIC: &str = "homeassistant/device/example-pi/config";
 const DAEMON_DISCOVERY_PREFIX: &str = "integration/discovery";
 const SERVICE_BINARY: &str = "/usr/local/bin/rpi-health-mqtt";
 const DIAGNOSTIC_CANARY: &str = "diagnostic-secret-canary-never-render";
+const PRINT_ONCE_CANARY: &str = "print-once-secret-canary-never-render";
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires the Docker validation broker"]
@@ -414,6 +415,83 @@ async fn diagnostics_binary_is_bounded_secret_safe_and_never_publishes() {
     let _ = observer_task.await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires the Docker validation broker and service binary"]
+async fn print_once_binary_is_json_only_secret_safe_and_never_publishes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let host = std::env::var("MQTT_TEST_HOST").expect("broker host must be configured");
+    let port = std::env::var("MQTT_TEST_PORT")
+        .expect("broker port must be configured")
+        .parse::<u16>()
+        .expect("broker port must be numeric");
+
+    let (observer_client, mut observer_events) =
+        observer(&host, port, "print-once-observer", PASSWORD);
+    connect(&mut observer_events).await;
+    observer_client
+        .subscribe("integration/diagnostics/#", QoS::AtLeastOnce)
+        .await
+        .expect("print-once observer subscription should queue");
+    wait_for_subscription(&mut observer_events).await;
+    let (publication_tx, mut publication_rx) = mpsc::unbounded_channel();
+    let observer_task = tokio::spawn(async move {
+        while let Ok(event) = observer_events.poll().await {
+            if let Event::Incoming(Incoming::Publish(publish)) = event {
+                let _ = publication_tx.send(publish);
+            }
+        }
+    });
+
+    let success =
+        DiagnosticFixture::new("print-once-success", &host, port, PRINT_ONCE_CANARY, 0o000);
+    let success_password = success.directory.join("mqtt-password");
+    assert_eq!(
+        fs::metadata(&success_password)
+            .expect("print-once credential metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777,
+        0
+    );
+    assert_eq!(
+        fs::read(&success_password)
+            .expect_err("print-once credential must be unreadable")
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    let (output, elapsed) = run_print_once(&success.config_path, Duration::from_secs(7)).await;
+    assert_eq!(output.status.code(), Some(i32::from(SUCCESS)));
+    assert!(elapsed < Duration::from_secs(5));
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("print-once stdout should contain exactly one JSON document");
+    assert!(document.is_object());
+    assert!(output.stderr.is_empty());
+    assert_secret_absent(&output, PRINT_ONCE_CANARY);
+
+    let missing =
+        DiagnosticFixture::new("print-once-missing", &host, port, PRINT_ONCE_CANARY, 0o000);
+    fs::remove_file(missing.directory.join("vcgencmd"))
+        .expect("fake firmware command should be removed");
+    let (output, elapsed) = run_print_once(&missing.config_path, Duration::from_secs(3)).await;
+    assert_eq!(output.status.code(), Some(i32::from(COLLECTION_ERROR)));
+    assert!(elapsed < Duration::from_secs(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output_text(&output.stderr),
+        "Collection error: vcgencmd was not found at the configured or standard installation paths\n"
+    );
+    assert_secret_absent(&output, PRINT_ONCE_CANARY);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        publication_rx.try_recv().is_err(),
+        "the print-once command must not publish MQTT messages"
+    );
+    observer_task.abort();
+    let _ = observer_task.await;
+}
+
 struct DiagnosticFixture {
     directory: PathBuf,
     config_path: PathBuf,
@@ -541,6 +619,41 @@ async fn run_diagnostic(
     }
 }
 
+async fn run_print_once(config_path: &Path, timeout: Duration) -> (Output, Duration) {
+    let binary =
+        std::env::var("RPI_HEALTH_MQTT_TEST_BINARY").unwrap_or_else(|_| SERVICE_BINARY.to_owned());
+    let mut process = Command::new(binary)
+        .arg("--config")
+        .arg(config_path)
+        .arg("print-once")
+        .env("RUST_LOG", "info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("print-once process should start");
+    let started = StdInstant::now();
+
+    loop {
+        if process
+            .try_wait()
+            .expect("print-once process status should be readable")
+            .is_some()
+        {
+            let output = process
+                .wait_with_output()
+                .expect("print-once output should be collected");
+            return (output, started.elapsed());
+        }
+        if started.elapsed() >= timeout {
+            let _ = process.kill();
+            let _ = process.wait();
+            panic!("print-once process exceeded its test deadline");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn output_text(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).expect("service output should be UTF-8")
 }
@@ -551,14 +664,14 @@ fn assert_secret_absent(output: &Output, secret: &str) {
             .stdout
             .windows(secret.len())
             .any(|value| value == secret.as_bytes()),
-        "diagnostics stdout must not expose the credential canary"
+        "service stdout must not expose the credential canary"
     );
     assert!(
         !output
             .stderr
             .windows(secret.len())
             .any(|value| value == secret.as_bytes()),
-        "diagnostics stderr must not expose the credential canary"
+        "service stderr must not expose the credential canary"
     );
 }
 

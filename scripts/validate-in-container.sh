@@ -6,10 +6,25 @@ mode="${1:?validation mode is required}"
 
 case "${mode}" in
   amd64)
+    shellcheck \
+      scripts/install.sh \
+      scripts/uninstall.sh \
+      scripts/validate-in-container.sh \
+      tests/install/fake-dpkg.sh \
+      tests/install/fake-systemctl.sh \
+      tests/install/fake-uname.sh \
+      tests/install/run.sh \
+      tests/install/verify-systemd-unit.sh
     cargo fmt --all -- --check
     cargo test --all-targets --all-features --locked
     cargo clippy --all-targets --all-features --locked -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items --locked
+    installer_target="armv7-unknown-linux-gnueabihf"
+    cargo build --locked --release --target "${installer_target}"
+    INSTALL_TEST_CONTAINER=1 \
+      INSTALL_TEST_ARM_BINARY="target/${installer_target}/release/rpi-health-mqtt" \
+      sh tests/install/run.sh
+    INSTALL_TEST_CONTAINER=1 sh tests/install/verify-systemd-unit.sh
     ;;
   armv7)
     target="armv7-unknown-linux-gnueabihf"

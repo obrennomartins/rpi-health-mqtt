@@ -1,5 +1,5 @@
 group "verify" {
-  targets = ["verify-amd64", "verify-armv7"]
+  targets = ["verify-amd64", "verify-armv7", "verify-systemd-bookworm"]
 }
 
 target "common" {
@@ -19,4 +19,10 @@ target "verify-armv7" {
   inherits = ["common"]
   target   = "verify-armv7"
   tags     = ["rpi-health-mqtt-verify-armv7:local"]
+}
+
+target "verify-systemd-bookworm" {
+  inherits = ["common"]
+  target   = "verify-systemd-bookworm"
+  tags     = ["rpi-health-mqtt-verify-systemd-bookworm:local"]
 }

@@ -36,6 +36,8 @@ RUN --mount=type=secret,id=host_ca \
 RUN rustup component add clippy rustfmt \
     && rustup target add armv7-unknown-linux-gnueabihf
 
+RUN install -o root -g root -m 0400 /dev/null /run/rpi-health-mqtt-test-container
+
 ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
 ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUNNER="qemu-arm-static -L /usr/arm-linux-gnueabihf"
 
@@ -67,3 +69,19 @@ RUN --mount=type=cache,id=rpi-health-cargo-registry,target=/usr/local/cargo/regi
        -exec cp '{}' /usr/local/bin/mqtt-integration-test ';'
 ENTRYPOINT ["/usr/local/bin/mqtt-integration-test"]
 CMD ["--ignored", "--test-threads=1"]
+
+FROM docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e AS verify-systemd-bookworm
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends systemd \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN install -o root -g root -m 0400 /dev/null /run/rpi-health-mqtt-test-container
+
+WORKDIR /workspace
+COPY systemd/ systemd/
+COPY tests/install/verify-systemd-unit.sh tests/install/verify-systemd-unit.sh
+
+RUN INSTALL_TEST_CONTAINER=1 sh tests/install/verify-systemd-unit.sh
