@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod model;
+
 /// The service version embedded at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
