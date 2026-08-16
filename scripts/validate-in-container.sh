@@ -9,12 +9,14 @@ case "${mode}" in
     shellcheck \
       scripts/install.sh \
       scripts/uninstall.sh \
+      scripts/validate-docs.sh \
       scripts/validate-in-container.sh \
       tests/install/fake-dpkg.sh \
       tests/install/fake-systemctl.sh \
       tests/install/fake-uname.sh \
       tests/install/run.sh \
       tests/install/verify-systemd-unit.sh
+    DOCS_REQUIRE_CODESPELL=1 bash scripts/validate-docs.sh
     cargo fmt --all -- --check
     cargo test --all-targets --all-features --locked
     cargo clippy --all-targets --all-features --locked -- -D warnings

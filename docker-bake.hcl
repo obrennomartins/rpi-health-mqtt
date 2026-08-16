@@ -1,5 +1,5 @@
 group "verify" {
-  targets = ["verify-amd64", "verify-armv7", "verify-systemd-bookworm"]
+  targets = ["verify-amd64", "verify-armv7", "verify-markdown", "verify-systemd-bookworm"]
 }
 
 target "common" {
@@ -19,6 +19,14 @@ target "verify-armv7" {
   inherits = ["common"]
   target   = "verify-armv7"
   tags     = ["rpi-health-mqtt-verify-armv7:local"]
+}
+
+target "verify-markdown" {
+  context    = "."
+  dockerfile = "docker/verify.Dockerfile"
+  platforms  = ["linux/amd64"]
+  target     = "verify-markdown"
+  tags       = ["rpi-health-mqtt-verify-markdown:local"]
 }
 
 target "verify-systemd-bookworm" {

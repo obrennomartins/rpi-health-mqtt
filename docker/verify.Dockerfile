@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.12
+# syntax=docker/dockerfile:1.12.0@sha256:db1ff77fb637a5955317c7a3a62540196396d565f3dd5742e76dddbb6d75c4c5
 
 FROM docker.io/library/eclipse-mosquitto:2.0.22@sha256:212f89e1eaeb2c322d6441b64396e3346026674db8fa9c27beac293405c32b3c AS broker-validation
 
@@ -16,6 +16,7 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         binutils-arm-linux-gnueabihf \
         ca-certificates \
+        codespell=2.0.0-1 \
         file \
         gcc-arm-linux-gnueabihf \
         libc6-dev-armhf-cross \
@@ -57,6 +58,17 @@ RUN --mount=type=cache,id=rpi-health-cargo-registry,target=/usr/local/cargo/regi
     --mount=type=cache,id=rpi-health-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=rpi-health-target-armv7,target=/workspace/target \
     bash scripts/validate-in-container.sh armv7
+
+FROM docker.io/davidanson/markdownlint-cli2:v0.18.1@sha256:173cb697a255a8a985f2c6a83b4f7a8b3c98f4fb382c71c45f1c52e4d4fed63a AS verify-markdown
+
+WORKDIR /workdir
+COPY README.md CONTRIBUTING.md SECURITY.md ./
+COPY config/project.markdownlint-cli2.jsonc config/project.markdownlint-cli2.jsonc
+COPY docs/ docs/
+
+RUN markdownlint-cli2 \
+    --config config/project.markdownlint-cli2.jsonc \
+    README.md CONTRIBUTING.md SECURITY.md "docs/**/*.md"
 
 FROM toolchain AS integration
 COPY . .
