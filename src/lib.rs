@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cli;
+pub mod collector;
 pub mod config;
 pub mod metrics;
 pub mod model;

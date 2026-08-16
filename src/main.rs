@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use rpi_health_mqtt::{
     cli::{Cli, Command, CONFIG_ERROR, DIAGNOSTIC_ERROR, RUNTIME_ERROR, SUCCESS},
+    collector::Collector,
     config::{Config, MqttCredentials},
 };
 
@@ -33,10 +34,7 @@ fn run(cli: Cli) -> u8 {
     };
 
     match cli.command {
-        Some(Command::PrintOnce) => {
-            eprintln!("Metric collection is not available in this incremental build.");
-            rpi_health_mqtt::cli::COLLECTION_ERROR
-        }
+        Some(Command::PrintOnce) => print_once(config.collector()),
         Some(Command::Check) => match MqttCredentials::load(config.mqtt()) {
             Ok(_) => {
                 println!("Configuration and credential file are valid.");
@@ -57,5 +55,25 @@ fn run(cli: Cli) -> u8 {
                 CONFIG_ERROR
             }
         },
+    }
+}
+
+fn print_once(config: &rpi_health_mqtt::config::CollectorConfig) -> u8 {
+    let mut collector = match Collector::new(config) {
+        Ok(collector) => collector,
+        Err(error) => {
+            eprintln!("Collection error: {error}");
+            return rpi_health_mqtt::cli::COLLECTION_ERROR;
+        }
+    };
+    match serde_json::to_string_pretty(&collector.collect()) {
+        Ok(json) => {
+            println!("{json}");
+            SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Collection error: state serialization failed: {error}");
+            rpi_health_mqtt::cli::COLLECTION_ERROR
+        }
     }
 }
