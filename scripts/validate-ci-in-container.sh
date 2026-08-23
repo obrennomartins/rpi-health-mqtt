@@ -2,12 +2,12 @@
 
 set -euo pipefail
 
+git config --global --add safe.directory "$(pwd)"
+
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "CI validation requires a Git worktree." >&2
     exit 1
 fi
-
-git config --global --add safe.directory "$(pwd)"
 
 if git ls-files --error-unmatch -- HANDOFF.md >/dev/null 2>&1; then
     echo "HANDOFF.md must not be tracked by Git." >&2
