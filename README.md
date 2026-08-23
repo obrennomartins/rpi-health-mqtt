@@ -63,6 +63,30 @@ artifact. The runtime requires:
 The source build uses Rust 1.97.1. Docker with Buildx and Compose is required for
 the complete development validation gate.
 
+## Install a release
+
+For a tagged release, download the ARMv7 archive and its matching `.sha256`
+file from the repository's GitHub Releases page. The checksum file alone does
+not authenticate the download. Before extracting or installing it, follow the
+[release artifact verification
+guide](docs/installation-and-configuration.md#release-artifacts) to verify the
+checksum, SPDX SBOM, and GitHub provenance attestations.
+
+```sh
+VERSION=0.1.0
+TARGET=armv7-unknown-linux-gnueabihf
+ARCHIVE="rpi-health-mqtt-${VERSION}-${TARGET}.tar.gz"
+
+sha256sum --check "${ARCHIVE}.sha256"
+tar -xzf "${ARCHIVE}"
+cd "rpi-health-mqtt-${VERSION}-${TARGET}"
+sudo ./scripts/install.sh \
+  --binary "target/${TARGET}/release/rpi-health-mqtt"
+```
+
+The archive includes the third-party license report, while the GitHub release
+also provides the SPDX SBOM and provenance attestations.
+
 ## Quick start
 
 Build directly on a 32-bit Raspberry Pi:

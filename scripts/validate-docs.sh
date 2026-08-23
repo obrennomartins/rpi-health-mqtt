@@ -10,6 +10,7 @@ documents=(
     docs/installation-and-configuration.md
     CONTRIBUTING.md
     SECURITY.md
+    .github/PULL_REQUEST_TEMPLATE.md
 )
 
 required_commands=(awk cmp cut diff dirname grep mktemp realpath rm sed sort tail tr uniq wc)

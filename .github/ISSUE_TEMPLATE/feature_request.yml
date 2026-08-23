@@ -1,0 +1,47 @@
+name: Feature request
+description: Propose a focused improvement to the public project.
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the use case with generic examples. Do not include credentials,
+        private infrastructure details, or production telemetry.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues for a similar request.
+          required: true
+        - label: This request contains no private or secret information.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Explain the user-facing problem without assuming a solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful change and its tradeoffs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: List existing workarounds or alternative designs.
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional sanitized context
+      description: Add generic examples, diagrams, or references if helpful.

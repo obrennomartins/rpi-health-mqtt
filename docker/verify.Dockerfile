@@ -72,12 +72,14 @@ FROM docker.io/davidanson/markdownlint-cli2:v0.18.1@sha256:173cb697a255a8a985f2c
 
 WORKDIR /workdir
 COPY README.md CONTRIBUTING.md SECURITY.md ./
+COPY .github/PULL_REQUEST_TEMPLATE.md .github/PULL_REQUEST_TEMPLATE.md
 COPY config/project.markdownlint-cli2.jsonc config/project.markdownlint-cli2.jsonc
 COPY docs/ docs/
 
 RUN markdownlint-cli2 \
     --config config/project.markdownlint-cli2.jsonc \
-    README.md CONTRIBUTING.md SECURITY.md "docs/**/*.md"
+    README.md CONTRIBUTING.md SECURITY.md \
+    .github/PULL_REQUEST_TEMPLATE.md "docs/**/*.md"
 
 FROM toolchain AS integration
 COPY . .

@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a reproducible defect using sanitized information.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve rpi-health-mqtt.
+
+        Never include MQTT credentials, private hostnames, network addresses,
+        production telemetry, or unsanitized logs. Follow SECURITY.md instead
+        of opening a public issue for a suspected vulnerability.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed secrets and site-specific identifiers from this report.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Provide the release version or commit identifier.
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: operating-system
+    attributes:
+      label: Operating system
+      description: Provide the sanitized operating system name and version.
+      placeholder: Raspberry Pi OS 32-bit
+    validations:
+      required: true
+
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Architecture
+      options:
+        - ARMv7 / armhf
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: Describe what should have happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed-behavior
+    attributes:
+      label: Observed behavior
+      description: Describe what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Use synthetic configuration, topics, identifiers, and payloads.
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include only the smallest relevant, redacted output.
+      render: text
