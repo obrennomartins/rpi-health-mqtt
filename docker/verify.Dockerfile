@@ -8,7 +8,7 @@ USER mosquitto
 ENTRYPOINT ["mosquitto"]
 CMD ["-c", "/mosquitto/config/mosquitto.conf"]
 
-FROM docker.io/library/rust:1.97.1-bullseye@sha256:90c2e6cd1f970487175cef2893e9429cb7bd3f20d344fe1941bb7dac6208b11f AS toolchain
+FROM docker.io/library/rust:1.98.0-bullseye@sha256:97cc99038824c3cee60ae9d0f75e0171ae0ae8b80786d26d0e7d21956f8d0164 AS toolchain
 
 ARG DEBIAN_FRONTEND=noninteractive
 
