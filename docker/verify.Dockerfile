@@ -93,7 +93,7 @@ RUN --mount=type=cache,id=rpi-health-cargo-registry,target=/usr/local/cargo/regi
 ENTRYPOINT ["/usr/local/bin/mqtt-integration-test"]
 CMD ["--ignored", "--test-threads=1"]
 
-FROM docker.io/library/debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS verify-systemd-bookworm
+FROM docker.io/library/debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS verify-systemd-bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
 
