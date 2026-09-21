@@ -11,7 +11,7 @@ categories = ["command-line-utilities"]
 publish = false
 
 [dependencies]
-clap = { version = "=4.6.6", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+clap = { version = "=4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 rumqttc = { version = "=0.25.1", default-features = false }
 secrecy = { version = "=0.10.3", default-features = false }
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -19,12 +19,12 @@ serde_json = "=1.0.151"
 thiserror = "=2.0.20"
 time = { version = "=0.3.55", default-features = false, features = ["formatting", "parsing", "std"] }
 tokio = { version = "=1.53.1", default-features = false, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
-toml = { version = "=1.1.4", default-features = false, features = ["parse", "serde", "std"] }
+toml = { version = "=1.1.6", default-features = false, features = ["parse", "serde", "std"] }
 tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["ansi", "env-filter", "fmt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process", "std"] }
+rustix = { version = "=1.1.5", default-features = false, features = ["fs", "process", "std"] }
 
 [lib]
 name = "rpi_health_mqtt"
