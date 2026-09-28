@@ -68,7 +68,7 @@ RUN --mount=type=cache,id=rpi-health-cargo-registry,target=/usr/local/cargo/regi
     --mount=type=cache,id=rpi-health-target-armv7,target=/workspace/target \
     bash scripts/validate-in-container.sh armv7
 
-FROM docker.io/davidanson/markdownlint-cli2:v0.18.1@sha256:173cb697a255a8a985f2c6a83b4f7a8b3c98f4fb382c71c45f1c52e4d4fed63a AS verify-markdown
+FROM docker.io/davidanson/markdownlint-cli2:v0.23.3@sha256:d5f3f3f04b2e285dcbcdcd13b4454d119e273e3c393a9dabd163dba4abad526d AS verify-markdown
 
 WORKDIR /workdir
 COPY README.md CONTRIBUTING.md SECURITY.md ./
